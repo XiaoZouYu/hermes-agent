@@ -113,6 +113,26 @@ class TestTryActivateFallback:
             assert agent.provider == "zai"
             assert agent.client is mock_client
 
+    def test_custom_gpt5_fallback_keeps_chat_completions(self):
+        agent = _make_agent(
+            fallback_model={"provider": "custom", "model": "gpt-5.4"},
+        )
+        mock_client = _mock_resolve(
+            api_key="sk-custom-key",
+            base_url="https://relay.example.com/v1",
+        )
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(mock_client, "gpt-5.4"),
+        ):
+            result = agent._try_activate_fallback()
+
+        assert result is True
+        assert agent.model == "gpt-5.4"
+        assert agent.provider == "custom"
+        assert agent.api_mode == "chat_completions"
+        assert agent.client is mock_client
+
     def test_fallback_uses_resolved_normalized_model(self):
         agent = _make_agent(
             fallback_model={"provider": "zai", "model": "zai/glm-5.1"},

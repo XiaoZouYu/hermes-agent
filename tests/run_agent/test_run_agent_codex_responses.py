@@ -243,6 +243,25 @@ def test_api_mode_respects_explicit_openrouter_provider_over_codex_url(monkeypat
     assert agent.provider == "openrouter"
 
 
+def test_custom_gpt5_endpoint_preserves_chat_completions(monkeypatch):
+    """Custom gateways may expose GPT-5 on /v1/chat/completions."""
+    _patch_agent_bootstrap(monkeypatch)
+    agent = run_agent.AIAgent(
+        model="gpt-5.4",
+        provider="custom",
+        api_mode="chat_completions",
+        base_url="https://relay.example.com/v1",
+        api_key="relay-token",
+        quiet_mode=True,
+        max_iterations=1,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    assert agent.api_mode == "chat_completions"
+    assert agent.provider == "custom"
+
+
 def test_build_api_kwargs_codex(monkeypatch):
     agent = _build_agent(monkeypatch)
     kwargs = agent._build_api_kwargs(

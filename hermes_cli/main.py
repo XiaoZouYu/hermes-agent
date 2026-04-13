@@ -1630,18 +1630,33 @@ def _model_flow_custom(config):
 
     probe = probe_api_models(effective_key, effective_url)
     if probe.get("used_fallback") and probe.get("resolved_base_url"):
-        print(
-            f"Warning: endpoint verification worked at {probe['resolved_base_url']}/models, "
-            f"not the exact URL you entered. Saving the working base URL instead."
-        )
+        if probe.get("auth_required"):
+            print(
+                f"Endpoint reachability check succeeded at {probe['resolved_base_url']}/models, "
+                f"not the exact URL you entered. Saving the working base URL instead."
+            )
+        else:
+            print(
+                f"Warning: endpoint verification worked at {probe['resolved_base_url']}/models, "
+                f"not the exact URL you entered. Saving the working base URL instead."
+            )
         effective_url = probe["resolved_base_url"]
         if base_url:
             base_url = effective_url
-    elif probe.get("models") is not None:
+    if probe.get("models") is not None:
         print(
             f"Verified endpoint via {probe.get('probed_url')} "
             f"({len(probe.get('models') or [])} model(s) visible)"
         )
+    elif probe.get("auth_required"):
+        requirement = "a valid API key" if effective_key else "an API key"
+        print(
+            f"Reached endpoint via {probe.get('probed_url')}, but `/models` requires {requirement}."
+        )
+        if not effective_key:
+            print("  The URL looks valid. Add an API key to fetch models automatically.")
+        elif probe.get("error_message"):
+            print(f"  Endpoint said: {probe.get('error_message')}")
     else:
         print(
             f"Warning: could not verify this endpoint via {probe.get('probed_url')}. "

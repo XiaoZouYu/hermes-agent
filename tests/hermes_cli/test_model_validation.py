@@ -1,5 +1,7 @@
 """Tests for provider-aware `/model` validation in hermes_cli.models."""
 
+import io
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 from hermes_cli.models import (
@@ -268,6 +270,57 @@ class TestFetchApiModels:
         assert probe["resolved_base_url"] == "https://api.githubcopilot.com"
         assert probe["used_fallback"] is False
 
+    def test_probe_api_models_marks_auth_required_endpoint_as_reachable(self):
+        def _fake_urlopen(req, timeout=5.0):
+            raise HTTPError(
+                req.full_url,
+                401,
+                "Unauthorized",
+                hdrs={"Content-Type": "application/json"},
+                fp=io.BytesIO(
+                    b'{"code":"API_KEY_REQUIRED","message":"API key is required in Authorization header"}'
+                ),
+            )
+
+        with patch("hermes_cli.models.urllib.request.urlopen", side_effect=_fake_urlopen):
+            probe = probe_api_models("", "https://risingsun.top/v1")
+
+        assert probe["models"] is None
+        assert probe["auth_required"] is True
+        assert probe["status_code"] == 401
+        assert probe["resolved_base_url"] == "https://risingsun.top/v1"
+        assert probe["probed_url"] == "https://risingsun.top/v1/models"
+        assert probe["error_message"] == "API_KEY_REQUIRED"
+
+    def test_probe_api_models_treats_v1_auth_challenge_as_valid_fallback(self):
+        def _fake_urlopen(req, timeout=5.0):
+            if req.full_url.endswith("/v1/models"):
+                raise HTTPError(
+                    req.full_url,
+                    401,
+                    "Unauthorized",
+                    hdrs={"Content-Type": "application/json"},
+                    fp=io.BytesIO(
+                        b'{"message":"API key is required in Authorization header"}'
+                    ),
+                )
+            raise HTTPError(
+                req.full_url,
+                404,
+                "Not Found",
+                hdrs={"Content-Type": "application/json"},
+                fp=io.BytesIO(b'{"message":"not found"}'),
+            )
+
+        with patch("hermes_cli.models.urllib.request.urlopen", side_effect=_fake_urlopen):
+            probe = probe_api_models("", "https://relay.example.com")
+
+        assert probe["models"] is None
+        assert probe["auth_required"] is True
+        assert probe["resolved_base_url"] == "https://relay.example.com/v1"
+        assert probe["used_fallback"] is True
+        assert probe["probed_url"] == "https://relay.example.com/v1/models"
+
     def test_fetch_github_model_catalog_filters_non_chat_models(self):
         class _Resp:
             def __enter__(self):
@@ -473,6 +526,9 @@ class TestValidateApiFallback:
                 "resolved_base_url": "http://localhost:8000",
                 "suggested_base_url": "http://localhost:8000/v1",
                 "used_fallback": False,
+                "auth_required": False,
+                "status_code": None,
+                "error_message": None,
             },
         ):
             result = validate_requested_model(
@@ -486,3 +542,29 @@ class TestValidateApiFallback:
         assert result["persist"] is True
         assert "http://localhost:8000/v1/models" in result["message"]
         assert "http://localhost:8000/v1" in result["message"]
+
+    def test_custom_endpoint_auth_required_message_is_not_reported_as_unreachable(self):
+        with patch(
+            "hermes_cli.models.probe_api_models",
+            return_value={
+                "models": None,
+                "probed_url": "https://risingsun.top/v1/models",
+                "resolved_base_url": "https://risingsun.top/v1",
+                "suggested_base_url": None,
+                "used_fallback": False,
+                "auth_required": True,
+                "status_code": 401,
+                "error_message": "API key is required",
+            },
+        ):
+            result = validate_requested_model(
+                "gpt-4o",
+                "custom",
+                api_key="",
+                base_url="https://risingsun.top/v1",
+            )
+
+        assert result["accepted"] is True
+        assert result["persist"] is True
+        assert "requires an API key" in result["message"]
+        assert "could not reach" not in result["message"].lower()

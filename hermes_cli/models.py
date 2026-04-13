@@ -1627,6 +1627,82 @@ def probe_api_models(
     timeout: float = 5.0,
 ) -> dict[str, Any]:
     """Probe an OpenAI-compatible ``/models`` endpoint with light URL heuristics."""
+    def _extract_error_strings(payload: Any) -> list[str]:
+        values: list[str] = []
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if key in {"message", "detail", "error_description", "code", "type"} and value:
+                    values.append(str(value))
+                else:
+                    values.extend(_extract_error_strings(value))
+        elif isinstance(payload, list):
+            for item in payload:
+                values.extend(_extract_error_strings(item))
+        elif isinstance(payload, str) and payload.strip():
+            values.append(payload.strip())
+        return values
+
+    def _http_error_probe_result(
+        exc: urllib.error.HTTPError,
+        candidate_base: str,
+        *,
+        is_fallback: bool,
+        suggested_base_url: Optional[str],
+        url: str,
+    ) -> Optional[dict[str, Any]]:
+        status_code = getattr(exc, "code", None)
+        headers = getattr(exc, "headers", None)
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+
+        payload: Any = None
+        if body:
+            try:
+                payload = json.loads(body)
+            except Exception:
+                payload = None
+
+        error_strings = _extract_error_strings(payload) if payload is not None else []
+        auth_hint_blob = " ".join(
+            [
+                *(value.lower() for value in error_strings),
+                body.lower(),
+                str(headers.get("WWW-Authenticate", "")).lower() if headers else "",
+            ]
+        )
+        auth_required = bool(status_code in {401, 403} and any(
+            needle in auth_hint_blob
+            for needle in (
+                "api key",
+                "api_key",
+                "authorization",
+                "bearer",
+                "authenticate",
+                "auth required",
+                "unauthorized",
+                "not authenticated",
+                "invalid_api_key",
+                "x-api-key",
+                "x-goog-api-key",
+                "token",
+            )
+        ))
+        if not auth_required:
+            return None
+
+        return {
+            "models": None,
+            "probed_url": url,
+            "resolved_base_url": candidate_base.rstrip("/"),
+            "suggested_base_url": suggested_base_url,
+            "used_fallback": is_fallback,
+            "auth_required": True,
+            "status_code": status_code,
+            "error_message": error_strings[0] if error_strings else None,
+        }
+
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
         return {
@@ -1635,6 +1711,9 @@ def probe_api_models(
             "resolved_base_url": "",
             "suggested_base_url": None,
             "used_fallback": False,
+            "auth_required": False,
+            "status_code": None,
+            "error_message": None,
         }
 
     if _is_github_models_base_url(normalized):
@@ -1645,6 +1724,9 @@ def probe_api_models(
             "resolved_base_url": COPILOT_BASE_URL,
             "suggested_base_url": None,
             "used_fallback": False,
+            "auth_required": False,
+            "status_code": 200 if models is not None else None,
+            "error_message": None,
         }
 
     if normalized.endswith("/v1"):
@@ -1657,7 +1739,10 @@ def probe_api_models(
         candidates.append((alternate_base, True))
 
     tried: list[str] = []
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": "hermes-agent/compat-probe",
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     if normalized.startswith(COPILOT_BASE_URL):
@@ -1676,7 +1761,20 @@ def probe_api_models(
                     "resolved_base_url": candidate_base.rstrip("/"),
                     "suggested_base_url": alternate_base if alternate_base != candidate_base else normalized,
                     "used_fallback": is_fallback,
+                    "auth_required": False,
+                    "status_code": getattr(resp, "status", 200),
+                    "error_message": None,
                 }
+        except urllib.error.HTTPError as exc:
+            probe_result = _http_error_probe_result(
+                exc,
+                candidate_base,
+                is_fallback=is_fallback,
+                suggested_base_url=alternate_base if alternate_base != candidate_base else normalized,
+                url=url,
+            )
+            if probe_result is not None:
+                return probe_result
         except Exception:
             continue
 
@@ -1686,6 +1784,9 @@ def probe_api_models(
         "resolved_base_url": normalized,
         "suggested_base_url": alternate_base if alternate_base != normalized else None,
         "used_fallback": False,
+        "auth_required": False,
+        "status_code": None,
+        "error_message": None,
     }
 
 
@@ -1803,6 +1904,28 @@ def validate_requested_model(
                     f"Consider saving that as your base URL."
                 )
 
+            return {
+                "accepted": True,
+                "persist": True,
+                "recognized": False,
+                "message": message,
+            }
+
+        if probe.get("auth_required"):
+            requirement = "a valid API key" if api_key else "an API key"
+            message = (
+                f"Note: reached this custom endpoint at `{probe.get('probed_url')}`, "
+                f"but `/models` requires {requirement}. Hermes will still save `{requested}`."
+            )
+            if not api_key:
+                message += "\n  Add an API key to verify and browse models automatically."
+            if probe.get("used_fallback"):
+                message += (
+                    f"\n  Endpoint reachability succeeded after trying `{probe.get('resolved_base_url')}`. "
+                    f"Consider saving that as your base URL."
+                )
+            elif probe.get("suggested_base_url"):
+                message += f"\n  If this server expects `/v1`, try base URL: `{probe.get('suggested_base_url')}`"
             return {
                 "accepted": True,
                 "persist": True,

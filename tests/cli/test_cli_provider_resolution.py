@@ -567,6 +567,9 @@ def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
             "resolved_base_url": "http://localhost:8000/v1",
             "suggested_base_url": "http://localhost:8000/v1",
             "used_fallback": True,
+            "auth_required": False,
+            "status_code": 200,
+            "error_message": None,
         },
     )
     monkeypatch.setattr(
@@ -589,6 +592,48 @@ def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
     # OPENAI_BASE_URL is no longer saved to .env — config.yaml is authoritative
     assert "OPENAI_BASE_URL" not in saved_env
     assert saved_env["MODEL"] == "llm"
+
+
+def test_model_flow_custom_accepts_auth_required_middleman_probe(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "hermes_cli.config.get_env_value",
+        lambda key: "" if key in {"OPENAI_BASE_URL", "OPENAI_API_KEY"} else "",
+    )
+    saved_env = {}
+    monkeypatch.setattr("hermes_cli.config.save_env_value", lambda key, value: saved_env.__setitem__(key, value))
+    monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda model: saved_env.__setitem__("MODEL", model))
+    monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
+    monkeypatch.setattr("hermes_cli.main._save_custom_provider", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "hermes_cli.models.probe_api_models",
+        lambda api_key, base_url: {
+            "models": None,
+            "probed_url": "https://risingsun.top/v1/models",
+            "resolved_base_url": "https://risingsun.top/v1",
+            "suggested_base_url": None,
+            "used_fallback": False,
+            "auth_required": True,
+            "status_code": 401,
+            "error_message": "API key is required in Authorization header",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"model": {"default": "", "provider": "custom", "base_url": ""}},
+    )
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+    answers = iter(["https://risingsun.top/v1", "gpt-4o", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "")
+
+    hermes_main._model_flow_custom({})
+    output = capsys.readouterr().out
+
+    assert "Reached endpoint via https://risingsun.top/v1/models" in output
+    assert "requires an API key" in output
+    assert "could not verify this endpoint" not in output.lower()
+    assert saved_env["MODEL"] == "gpt-4o"
 
 
 def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):

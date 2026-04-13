@@ -671,14 +671,11 @@ class AIAgent:
         except Exception:
             pass
 
-        # GPT-5.x models require the Responses API path — they are rejected
-        # on /v1/chat/completions by both OpenAI and OpenRouter.  Also
-        # auto-upgrade for direct OpenAI URLs (api.openai.com) since all
-        # newer tool-calling models prefer Responses there.
-        if self.api_mode == "chat_completions" and (
-            self._is_direct_openai_url()
-            or self._model_requires_responses_api(self.model)
-        ):
+        # GPT-5.x models require the Responses API path on OpenAI-family
+        # routes like OpenAI, OpenRouter, Copilot, and Codex. Custom
+        # OpenAI-compatible gateways can legitimately expose GPT-5 models on
+        # /v1/chat/completions, so don't override their explicit mode.
+        if self.api_mode == "chat_completions" and self._should_force_responses_api():
             self.api_mode = "codex_responses"
 
         # Pre-warm OpenRouter model metadata cache in a background thread.
@@ -1835,18 +1832,47 @@ class AIAgent:
 
     @staticmethod
     def _model_requires_responses_api(model: str) -> bool:
-        """Return True for models that require the Responses API path.
+        """Return True for GPT-5/Codex model families.
 
-        GPT-5.x models are rejected on /v1/chat/completions by both
-        OpenAI and OpenRouter (error: ``unsupported_api_for_model``).
-        Detect these so the correct api_mode is set regardless of
-        which provider is serving the model.
+        These models often require the Responses API on OpenAI-family routes,
+        but custom compatible gateways may still serve them over
+        ``/v1/chat/completions``.
         """
         m = model.lower()
         # Strip vendor prefix (e.g. "openai/gpt-5.4" → "gpt-5.4")
         if "/" in m:
             m = m.rsplit("/", 1)[-1]
         return m.startswith("gpt-5")
+
+    def _should_force_responses_api(
+        self,
+        model: str = None,
+        provider: str = None,
+        base_url: str = None,
+    ) -> bool:
+        """Return True when this route should auto-upgrade GPT-5 to Responses.
+
+        Only known OpenAI-family routes are force-upgraded. Explicit custom
+        endpoints keep ``chat_completions`` unless the user/config chose a
+        different ``api_mode``.
+        """
+        effective_model = model or self.model or ""
+        if not self._model_requires_responses_api(effective_model):
+            return False
+
+        effective_provider = (provider or self.provider or "").strip().lower()
+        effective_base_url = (base_url or self.base_url or "").strip().lower()
+
+        if self._is_direct_openai_url(effective_base_url):
+            return True
+        if "openrouter" in effective_base_url:
+            return True
+        if "api.githubcopilot.com" in effective_base_url or "models.github.ai" in effective_base_url:
+            return True
+        if "chatgpt.com/backend-api/codex" in effective_base_url:
+            return True
+
+        return effective_provider in {"openrouter", "openai-codex", "copilot", "copilot-acp"}
 
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
@@ -5474,9 +5500,14 @@ class AIAgent:
                 fb_api_mode = "anthropic_messages"
             elif self._is_direct_openai_url(fb_base_url):
                 fb_api_mode = "codex_responses"
-            elif self._model_requires_responses_api(fb_model):
-                # GPT-5.x models need Responses API on every provider
-                # (OpenRouter, Copilot, direct OpenAI, etc.)
+            elif self._should_force_responses_api(
+                model=fb_model,
+                provider=fb_provider,
+                base_url=fb_base_url,
+            ):
+                # GPT-5.x models need Responses API on known OpenAI-family
+                # routes, but custom compatible gateways may still use
+                # /v1/chat/completions.
                 fb_api_mode = "codex_responses"
 
             old_model = self.model
