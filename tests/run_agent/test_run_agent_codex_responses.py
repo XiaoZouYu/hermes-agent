@@ -290,6 +290,69 @@ def test_build_api_kwargs_codex(monkeypatch):
     assert "extra_body" not in kwargs
 
 
+def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
+    """'minimal' reasoning effort is clamped to 'low' on the Responses API.
+
+    GPT-5.4 supports none/low/medium/high/xhigh but NOT 'minimal'.
+    Users may configure 'minimal' via OpenRouter conventions, so the Codex
+    Responses path must clamp it to the nearest supported level.
+    """
+    _patch_agent_bootstrap(monkeypatch)
+
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="codex-token",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+        reasoning_config={"enabled": True, "effort": "minimal"},
+    )
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+    agent._save_session_log = lambda messages: None
+
+    kwargs = agent._build_api_kwargs(
+        [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "Ping"},
+        ]
+    )
+
+    assert kwargs["reasoning"]["effort"] == "low"
+
+
+def test_build_api_kwargs_codex_preserves_supported_efforts(monkeypatch):
+    """Effort levels natively supported by the Responses API pass through unchanged."""
+    _patch_agent_bootstrap(monkeypatch)
+
+    for effort in ("low", "medium", "high", "xhigh"):
+        agent = run_agent.AIAgent(
+            model="gpt-5-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_key="codex-token",
+            quiet_mode=True,
+            max_iterations=4,
+            skip_context_files=True,
+            skip_memory=True,
+            reasoning_config={"enabled": True, "effort": effort},
+        )
+        agent._cleanup_task_resources = lambda task_id: None
+        agent._persist_session = lambda messages, history=None: None
+        agent._save_trajectory = lambda messages, user_message, completed: None
+        agent._save_session_log = lambda messages: None
+
+        kwargs = agent._build_api_kwargs(
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"},
+            ]
+        )
+        assert kwargs["reasoning"]["effort"] == effort, f"{effort} should pass through unchanged"
+
+
 def test_build_api_kwargs_copilot_responses_omits_openai_only_fields(monkeypatch):
     agent = _build_copilot_agent(monkeypatch)
     kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
@@ -1189,13 +1252,17 @@ def test_chat_messages_to_responses_input_deduplicates_reasoning_ids(monkeypatch
     ]
     items = agent._chat_messages_to_responses_input(messages)
 
-    reasoning_ids = [it["id"] for it in items if it.get("type") == "reasoning"]
-    # rs_aaa should appear only once (first occurrence kept)
-    assert reasoning_ids.count("rs_aaa") == 1
-    # rs_bbb and rs_ccc should each appear once
-    assert reasoning_ids.count("rs_bbb") == 1
-    assert reasoning_ids.count("rs_ccc") == 1
-    assert len(reasoning_ids) == 3
+    reasoning_items = [it for it in items if it.get("type") == "reasoning"]
+    # Dedup: rs_aaa appears in both turns but should only be emitted once.
+    # 3 unique items total: enc_1 (from rs_aaa), enc_2 (rs_bbb), enc_3 (rs_ccc).
+    assert len(reasoning_items) == 3
+    encrypted = [it["encrypted_content"] for it in reasoning_items]
+    assert encrypted.count("enc_1") == 1
+    assert "enc_2" in encrypted
+    assert "enc_3" in encrypted
+    # IDs must be stripped — with store=False the API 404s on id lookups.
+    for it in reasoning_items:
+        assert "id" not in it
 
 
 def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
@@ -1212,7 +1279,11 @@ def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
     normalized = agent._preflight_codex_input_items(raw_input)
 
     reasoning_items = [it for it in normalized if it.get("type") == "reasoning"]
-    reasoning_ids = [it["id"] for it in reasoning_items]
-    assert reasoning_ids.count("rs_xyz") == 1
-    assert reasoning_ids.count("rs_zzz") == 1
+    # rs_xyz duplicate should be collapsed to one item; rs_zzz kept.
     assert len(reasoning_items) == 2
+    encrypted = [it["encrypted_content"] for it in reasoning_items]
+    assert encrypted.count("enc_a") == 1
+    assert "enc_b" in encrypted
+    # IDs must be stripped — with store=False the API 404s on id lookups.
+    for it in reasoning_items:
+        assert "id" not in it

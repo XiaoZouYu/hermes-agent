@@ -165,7 +165,7 @@ class TestNormalizeProvider:
 class TestProviderLabel:
     def test_known_labels_and_auto(self):
         assert provider_label("anthropic") == "Anthropic"
-        assert provider_label("kimi") == "Kimi / Moonshot"
+        assert provider_label("kimi") == "Kimi / Kimi Coding Plan"
         assert provider_label("copilot") == "GitHub Copilot"
         assert provider_label("copilot-acp") == "GitHub Copilot ACP"
         assert provider_label("auto") == "Auto"
@@ -423,6 +423,8 @@ class TestCopilotNormalization:
         assert opencode_model_api_mode("opencode-zen", "minimax-m2.5") == "chat_completions"
 
     def test_opencode_go_api_modes_match_docs(self):
+        assert opencode_model_api_mode("opencode-go", "glm-5.1") == "chat_completions"
+        assert opencode_model_api_mode("opencode-go", "opencode-go/glm-5.1") == "chat_completions"
         assert opencode_model_api_mode("opencode-go", "glm-5") == "chat_completions"
         assert opencode_model_api_mode("opencode-go", "opencode-go/glm-5") == "chat_completions"
         assert opencode_model_api_mode("opencode-go", "kimi-k2.5") == "chat_completions"
@@ -489,7 +491,22 @@ class TestValidateApiNotFound:
     def test_warning_includes_suggestions(self):
         result = _validate("anthropic/claude-opus-4.5")
         assert result["accepted"] is True
-        assert "Similar models" in result["message"]
+        # Close match auto-corrects; less similar inputs show suggestions
+        assert "Auto-corrected" in result["message"] or "Similar models" in result["message"]
+
+    def test_auto_correction_returns_corrected_model(self):
+        """When a very close match exists, validate returns corrected_model."""
+        result = _validate("anthropic/claude-opus-4.5")
+        assert result["accepted"] is True
+        assert result.get("corrected_model") == "anthropic/claude-opus-4.6"
+        assert result["recognized"] is True
+
+    def test_dissimilar_model_shows_suggestions_not_autocorrect(self):
+        """Models too different for auto-correction still get suggestions."""
+        result = _validate("anthropic/claude-nonexistent")
+        assert result["accepted"] is True
+        assert result.get("corrected_model") is None
+        assert "not found" in result["message"]
 
 
 # -- validate — API unreachable — accept and persist everything ----------------
