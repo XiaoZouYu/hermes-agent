@@ -36,6 +36,9 @@ def _make_agent(fallback_model=None):
     ):
         agent = AIAgent(
             api_key="test-key",
+            base_url="https://primary.example.com/v1",
+            provider="custom",
+            api_mode="chat_completions",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,

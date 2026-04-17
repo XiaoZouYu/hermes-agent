@@ -615,7 +615,7 @@ def test_model_flow_custom_accepts_auth_required_middleman_probe(monkeypatch, ca
     )
     monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
 
-    answers = iter(["https://risingsun.top/v1", "gpt-4o", ""])
+    answers = iter(["https://risingsun.top/v1", "gpt-4o", "", ""])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     monkeypatch.setattr("getpass.getpass", lambda _prompt="": "")
 
